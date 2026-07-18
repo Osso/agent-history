@@ -176,9 +176,7 @@ fn captured_human_output_without_no_color_has_no_ansi_escapes() {
     let home = TempDir::new().expect("temp home");
     let fake_root = TempDir::new().expect("fake backend root");
     let (fake_bin, argv_log) = fake_claude_memory(fake_root.path());
-    let backend_output = concat!(
-        "{\"type\":\"answer\",\"text\":\"captured human result\",\"source\":\"session\",\"path\":\"/history/captured\",\"session_id\":\"session-captured\",\"score\":0.73}\n",
-    );
+    let backend_output = "{\"type\":\"answer\",\"text\":\"captured human result\",\"source\":\"session\",\"path\":\"/history/captured\",\"session_id\":\"session-captured\",\"score\":0.73}\n";
 
     let output = agent_history(home.path(), &fake_bin, &argv_log, backend_output)
         .args(["search", "query"])

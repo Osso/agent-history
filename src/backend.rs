@@ -7,7 +7,8 @@ pub struct SearchRecord {
     #[serde(rename = "type")]
     pub record_type: String,
     pub text: String,
-    pub source: String,
+    #[serde(rename = "source")]
+    pub _source: String,
     pub path: String,
     pub session_id: String,
     pub score: f32,

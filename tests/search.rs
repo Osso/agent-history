@@ -281,6 +281,32 @@ fn pi_slash_project_filter_keeps_matching_session() {
 }
 
 #[test]
+fn claude_dotted_project_filter_keeps_matching_session() {
+    let tmp = TempDir::new().expect("temp dir");
+    write_file(
+        &tmp.path()
+            .join(".claude/projects/-home-osso--claude-rules/claude-dotted.jsonl"),
+        r#"{"type":"user","sessionId":"claude-dotted","timestamp":"2026-06-07T10:00:00Z","cwd":"/home/osso/.claude/rules","message":{"content":"Claude dotted project"}}
+"#,
+    );
+
+    agent_history(tmp.path())
+        .args([
+            "search",
+            "Claude dotted project",
+            "--source",
+            "claude",
+            "--project",
+            ".claude/rules",
+            "--no-color",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("claude:claude-dotted"))
+        .stdout(predicate::str::contains("Claude dotted project"));
+}
+
+#[test]
 fn claude_hyphen_project_filter_keeps_matching_session() {
     let tmp = TempDir::new().expect("temp dir");
     write_file(

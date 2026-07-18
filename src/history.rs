@@ -322,7 +322,10 @@ fn claude_project_filter_can_prune(path: &str, filter: Option<&str>) -> bool {
         return false;
     };
 
-    !filter.contains('-') && !path.contains(filter)
+    filter
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || character == '/')
+        && !path.contains(filter)
 }
 
 fn path_contains_optional_filter(path: &str, filter: Option<&str>) -> bool {

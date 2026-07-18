@@ -1,333 +1,227 @@
 use assert_cmd::Command;
-use predicates::prelude::*;
+use std::env;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
-fn agent_history(home: &Path) -> Command {
-    let mut cmd = Command::cargo_bin("agent-history").expect("agent-history binary");
-    cmd.env("HOME", home);
-    cmd
+fn agent_history(home: &Path, fake_bin: &Path, argv_log: &Path, output: &str) -> Command {
+    let mut command = Command::cargo_bin("agent-history").expect("agent-history binary");
+    let mut path_entries = vec![fake_bin.to_path_buf()];
+    path_entries.extend(env::split_paths(&env::var_os("PATH").expect("PATH")));
+
+    command
+        .env("HOME", home)
+        .env("PATH", env::join_paths(path_entries).expect("PATH entries"))
+        .env("FAKE_ARGV_LOG", argv_log)
+        .env("FAKE_OUTPUT", output);
+    command
 }
 
-fn write_file(path: &Path, content: &str) {
-    fs::create_dir_all(path.parent().expect("parent dir")).expect("create parent dir");
-    fs::write(path, content).expect("write fixture");
+fn fake_claude_memory(root: &Path) -> (PathBuf, PathBuf) {
+    let bin = root.join("bin");
+    let executable = bin.join("claude-memory");
+    let argv_log = root.join("claude-memory.argv");
+    fs::create_dir_all(&bin).expect("create fake backend directory");
+    fs::write(
+        &executable,
+        "#!/bin/sh\nprintf '%s\\n' '---' >> \"$FAKE_ARGV_LOG\"\nfor arg in \"$@\"; do printf '%s\\n' \"$arg\" >> \"$FAKE_ARGV_LOG\"; done\nprintf '%s' \"$FAKE_OUTPUT\"\nexit 0\n",
+    )
+    .expect("write fake backend");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(&executable)
+            .expect("fake backend metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&executable, permissions).expect("make fake backend executable");
+    }
+
+    (bin, argv_log)
 }
 
-fn write_claude_session(home: &Path) {
-    write_file(
-        &home.join(".claude/projects/-tmp-demo/claude-abc123.jsonl"),
-        r#"{"type":"user","sessionId":"claude-abc123","timestamp":"2026-06-01T10:00:00Z","cwd":"/tmp/demo","message":{"content":"Need alpha search"}}
-{"type":"assistant","sessionId":"claude-abc123","timestamp":"2026-06-01T10:01:00Z","cwd":"/tmp/demo","message":{"content":[{"type":"text","text":"Visible beta reply"},{"type":"tool_use","input":{"query":"hidden gamma claude-tool"}},{"type":"tool_result","content":"hidden gamma claude-result"}]}}
-"#,
+fn invocations(argv_log: &Path) -> Vec<Vec<String>> {
+    let content = fs::read_to_string(argv_log).expect("backend argv log");
+    content
+        .split("---\n")
+        .filter(|invocation| !invocation.is_empty())
+        .map(|invocation| invocation.lines().map(str::to_owned).collect())
+        .collect()
+}
+
+fn assert_in_order(output: &str, values: &[&str]) {
+    let mut offset = 0;
+    for value in values {
+        let position = output[offset..]
+            .find(value)
+            .unwrap_or_else(|| panic!("missing {value:?} after byte {offset} in {output:?}"));
+        offset += position + value.len();
+    }
+}
+
+#[test]
+fn plain_query_invokes_claude_memory_once_with_default_limit() {
+    let home = TempDir::new().expect("temp home");
+    let fake_root = TempDir::new().expect("fake backend root");
+    let (fake_bin, argv_log) = fake_claude_memory(fake_root.path());
+    let output = r#"{"type":"answer","text":"backend result","source":"session","path":"/history/one","session_id":"session-one","score":0.99}
+"#;
+
+    agent_history(home.path(), &fake_bin, &argv_log, output)
+        .args(["search", "literal .* [query]", "--no-color"])
+        .assert()
+        .success();
+
+    assert_eq!(
+        invocations(&argv_log),
+        vec![vec![
+            "search".to_owned(),
+            "--json".to_owned(),
+            "--limit".to_owned(),
+            "5".to_owned(),
+            "literal .* [query]".to_owned(),
+        ]]
     );
 }
 
-fn write_codex_session(home: &Path) {
-    write_file(
-        &home.join(".codex/sessions/2026/06/02/rollout-2026-06-02T11-00-00-codex-live.jsonl"),
-        r#"{"type":"session_meta","payload":{"id":"codex-live","cwd":"/tmp/demo"}}
-{"type":"response_item","timestamp":"2026-06-02T11:00:00Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Codex alpha request"}]}}
-{"type":"response_item","timestamp":"2026-06-02T11:01:00Z","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Codex beta answer"}]}}
-{"type":"response_item","timestamp":"2026-06-02T11:02:00Z","payload":{"type":"function_call","name":"read","arguments":"hidden gamma codex-tool"}}
-{"type":"response_item","timestamp":"2026-06-02T11:03:00Z","payload":{"type":"function_call_output","output":"hidden gamma codex-output"}}
-"#,
+#[test]
+fn max_count_aliases_forward_their_values_as_backend_limit() {
+    let home = TempDir::new().expect("temp home");
+    let fake_root = TempDir::new().expect("fake backend root");
+    let (fake_bin, argv_log) = fake_claude_memory(fake_root.path());
+    let output = r#"{"type":"answer","text":"backend result","source":"session","path":"/history/one","session_id":"session-one","score":0.99}
+"#;
+
+    agent_history(home.path(), &fake_bin, &argv_log, output)
+        .args(["search", "query", "-m", "3"])
+        .assert()
+        .success();
+    agent_history(home.path(), &fake_bin, &argv_log, output)
+        .args(["search", "query", "--max-count", "7"])
+        .assert()
+        .success();
+
+    let calls = invocations(&argv_log);
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0][..4], ["search", "--json", "--limit", "3"]);
+    assert_eq!(calls[1][..4], ["search", "--json", "--limit", "7"]);
+}
+
+#[test]
+fn json_output_preserves_backend_records_and_rank_order() {
+    let home = TempDir::new().expect("temp home");
+    let fake_root = TempDir::new().expect("fake backend root");
+    let (fake_bin, argv_log) = fake_claude_memory(fake_root.path());
+    let backend_output = concat!(
+        "{\"type\":\"answer\",\"text\":\"first result\",\"source\":\"session\",\"path\":\"/history/first\",\"session_id\":\"session-first\",\"score\":0.91}\n",
+        "{\"type\":\"prompt\",\"text\":\"second result\",\"source\":\"archive\",\"path\":\"/history/second\",\"session_id\":\"session-second\",\"score\":0.42}\n",
     );
-}
 
-fn write_pi_session(home: &Path) {
-    write_file(
-        &home.join(".config/pi/agent/sessions/demo-project/2026-06-03T12-00-00-000Z_pi-live.jsonl"),
-        r#"{"type":"session","version":3,"id":"pi-live","timestamp":"2026-06-03T12:00:00Z","cwd":"/tmp/demo"}
-{"type":"message","id":"m1","timestamp":"2026-06-03T12:00:01Z","message":{"role":"user","content":[{"type":"text","text":"Pi alpha prompt"}]}}
-{"type":"message","id":"m2","timestamp":"2026-06-03T12:00:02Z","message":{"role":"assistant","content":[{"type":"text","text":"Pi beta response"},{"type":"toolCall","input":{"query":"hidden gamma pi-toolcall"}},{"type":"toolResult","content":"hidden gamma pi-toolresult"},{"type":"tool_result","content":"hidden gamma pi-tool-result"}]}}
-"#,
-    );
-}
-
-#[test]
-fn searches_all_sources_by_default() {
-    let tmp = TempDir::new().expect("temp dir");
-    write_claude_session(tmp.path());
-    write_codex_session(tmp.path());
-    write_pi_session(tmp.path());
-
-    agent_history(tmp.path())
-        .args(["search", "alpha", "--no-color"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("claude:claude-abc123"))
-        .stdout(predicate::str::contains("codex:codex-live"))
-        .stdout(predicate::str::contains("pi:pi-live"));
-}
-
-#[test]
-fn filters_by_source_role_project_session_and_dates() {
-    let tmp = TempDir::new().expect("temp dir");
-    write_claude_session(tmp.path());
-    write_codex_session(tmp.path());
-    write_pi_session(tmp.path());
-
-    agent_history(tmp.path())
-        .args([
-            "search",
-            "beta",
-            "--source",
-            "codex",
-            "--role",
-            "assistant",
-            "--project",
-            "/tmp/demo",
-            "--session",
-            "codex-live",
-            "--since",
-            "2026-06-02",
-            "--until",
-            "2026-06-02",
-            "--no-color",
-        ])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("codex:codex-live"))
-        .stdout(predicate::str::contains("Codex beta answer"))
-        .stdout(predicate::str::contains("claude:").not())
-        .stdout(predicate::str::contains("pi:").not());
-}
-
-#[test]
-fn hidden_tool_payloads_require_all_flag() {
-    let tmp = TempDir::new().expect("temp dir");
-    write_claude_session(tmp.path());
-    write_codex_session(tmp.path());
-    write_pi_session(tmp.path());
-
-    agent_history(tmp.path())
-        .args(["search", "hidden gamma", "--no-color"])
-        .assert()
-        .failure()
-        .code(1);
-
-    agent_history(tmp.path())
-        .args(["search", "hidden gamma", "--all", "--no-color"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("hidden gamma"));
-}
-
-#[test]
-fn files_with_matches_deduplicates_session_paths_and_honors_max_count() {
-    let tmp = TempDir::new().expect("temp dir");
-    write_claude_session(tmp.path());
-    write_codex_session(tmp.path());
-    write_pi_session(tmp.path());
-
-    agent_history(tmp.path())
-        .args(["search", "beta|alpha", "-l", "-m", "2", "--no-color"])
-        .assert()
-        .success()
-        .stdout(predicate::function(|stdout: &str| {
-            let lines = stdout.lines().collect::<Vec<_>>();
-            lines.len() == 2
-                && lines[0].contains("claude-abc123.jsonl")
-                && lines[1].contains("rollout-2026-06-02T11-00-00-codex-live.jsonl")
-        }));
-}
-
-#[test]
-fn json_output_does_not_serialize_raw_or_hidden_payloads_by_default() {
-    let tmp = TempDir::new().expect("temp dir");
-    write_pi_session(tmp.path());
-
-    let output = agent_history(tmp.path())
-        .args([
-            "search",
-            "Pi alpha",
-            "--source",
-            "pi",
-            "--json",
-            "--no-color",
-        ])
+    let output = agent_history(home.path(), &fake_bin, &argv_log, backend_output)
+        .args(["search", "query", "--json"])
         .assert()
         .success()
         .get_output()
         .stdout
         .clone();
-    let json: serde_json::Value = serde_json::from_slice(&output).expect("valid json line");
 
-    assert_eq!(json["source"], "pi");
-    assert_eq!(json["session"], "pi-live");
-    assert_eq!(json["role"], "user");
-    assert_eq!(json["cwd"], "/tmp/demo");
-    assert_eq!(json["text"], "Pi alpha prompt");
-    assert!(json.get("raw").is_none());
+    assert_eq!(output, backend_output.as_bytes());
+}
 
-    let hidden_output = agent_history(tmp.path())
-        .args([
-            "search",
-            "Pi beta",
-            "--source",
-            "pi",
-            "--json",
-            "--no-color",
-        ])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let hidden_json: serde_json::Value =
-        serde_json::from_slice(&hidden_output).expect("valid json line");
+#[test]
+fn human_output_renders_score_type_session_path_then_text_without_color() {
+    let home = TempDir::new().expect("temp home");
+    let fake_root = TempDir::new().expect("fake backend root");
+    let (fake_bin, argv_log) = fake_claude_memory(fake_root.path());
+    let backend_output = concat!(
+        "{\"type\":\"answer\",\"text\":\"first human result\",\"source\":\"session\",\"path\":\"/history/first\",\"session_id\":\"session-first\",\"score\":0.91}\n",
+        "{\"type\":\"prompt\",\"text\":\"second human result\",\"source\":\"archive\",\"path\":\"/history/second\",\"session_id\":\"session-second\",\"score\":0.42}\n",
+    );
 
-    assert!(hidden_json.get("raw").is_none());
+    let output = String::from_utf8(
+        agent_history(home.path(), &fake_bin, &argv_log, backend_output)
+            .args(["search", "query", "--no-color"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone(),
+    )
+    .expect("human output UTF-8");
+
+    assert_in_order(
+        &output,
+        &[
+            "0.91",
+            "answer",
+            "session-first",
+            "/history/first",
+            "first human result",
+            "0.42",
+            "prompt",
+            "session-second",
+            "/history/second",
+            "second human result",
+        ],
+    );
     assert!(
-        !hidden_output
-            .windows("hidden gamma".len())
-            .any(|window| window == b"hidden gamma")
+        !output.contains('\x1b'),
+        "unexpected ANSI escape: {output:?}"
     );
 }
 
 #[test]
-fn role_tool_matches_hidden_tool_payloads_across_sources_when_all_is_set() {
-    let tmp = TempDir::new().expect("temp dir");
-    write_claude_session(tmp.path());
-    write_codex_session(tmp.path());
-    write_pi_session(tmp.path());
-
-    agent_history(tmp.path())
-        .args([
-            "search",
-            "hidden gamma",
-            "--all",
-            "--role",
-            "tool",
-            "--no-color",
-        ])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("claude-tool"))
-        .stdout(predicate::str::contains("claude-result"))
-        .stdout(predicate::str::contains("codex-tool"))
-        .stdout(predicate::str::contains("codex-output"))
-        .stdout(predicate::str::contains("pi-toolcall"))
-        .stdout(predicate::str::contains("pi-toolresult"))
-        .stdout(predicate::str::contains("pi-tool-result"))
-        .stdout(predicate::str::contains(" tool "));
-}
-
-#[test]
-fn pi_source_without_storage_returns_no_results_not_an_error() {
-    let tmp = TempDir::new().expect("temp dir");
-
-    agent_history(tmp.path())
-        .args(["search", "anything", "--source", "pi", "--no-color"])
-        .assert()
-        .failure()
-        .code(1)
-        .stderr(predicate::str::is_empty());
-}
-
-#[test]
-fn claude_slash_project_filter_keeps_matching_session() {
-    let tmp = TempDir::new().expect("temp dir");
-    write_file(
-        &tmp.path()
-            .join(".claude/projects/-tmp-globalcomix-gc/claude-slash.jsonl"),
-        r#"{"type":"user","sessionId":"claude-slash","timestamp":"2026-06-04T10:00:00Z","cwd":"/tmp/globalcomix/gc","message":{"content":"Claude slash project"}}
-"#,
+fn captured_human_output_without_no_color_has_no_ansi_escapes() {
+    let home = TempDir::new().expect("temp home");
+    let fake_root = TempDir::new().expect("fake backend root");
+    let (fake_bin, argv_log) = fake_claude_memory(fake_root.path());
+    let backend_output = concat!(
+        "{\"type\":\"answer\",\"text\":\"captured human result\",\"source\":\"session\",\"path\":\"/history/captured\",\"session_id\":\"session-captured\",\"score\":0.73}\n",
     );
 
-    agent_history(tmp.path())
-        .args([
-            "search",
-            "Claude slash project",
-            "--source",
-            "claude",
-            "--project",
-            "globalcomix/gc",
-            "--no-color",
-        ])
+    let output = agent_history(home.path(), &fake_bin, &argv_log, backend_output)
+        .args(["search", "query"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("claude:claude-slash"))
-        .stdout(predicate::str::contains("Claude slash project"));
+        .get_output()
+        .stdout
+        .clone();
+
+    assert!(
+        !output.contains(&b'\x1b'),
+        "unexpected ANSI escape in captured human output: {output:?}"
+    );
 }
 
 #[test]
-fn pi_slash_project_filter_keeps_matching_session() {
-    let tmp = TempDir::new().expect("temp dir");
-    write_file(
-        &tmp.path()
-            .join(".config/pi/agent/sessions/demo-project/pi-slash.jsonl"),
-        r#"{"type":"session","version":3,"id":"pi-slash","timestamp":"2026-06-05T10:00:00Z","cwd":"/tmp/pi/project"}
-{"type":"message","id":"m1","timestamp":"2026-06-05T10:00:01Z","message":{"role":"user","content":[{"type":"text","text":"Pi slash project"}]}}
-"#,
-    );
+fn removed_options_are_rejected_by_clap() {
+    let home = TempDir::new().expect("temp home");
+    let fake_root = TempDir::new().expect("fake backend root");
+    let (fake_bin, argv_log) = fake_claude_memory(fake_root.path());
+    let removed_options = [
+        vec!["--source", "claude"],
+        vec!["--role", "assistant"],
+        vec!["--project", "/tmp/project"],
+        vec!["--session", "session"],
+        vec!["--since", "2026-01-01"],
+        vec!["--until", "2026-01-01"],
+        vec!["-i"],
+        vec!["--ignore-case"],
+        vec!["-l"],
+        vec!["--files-with-matches"],
+        vec!["--live-only"],
+        vec!["--archive-only"],
+        vec!["--all"],
+    ];
 
-    agent_history(tmp.path())
-        .args([
-            "search",
-            "Pi slash project",
-            "--source",
-            "pi",
-            "--project",
-            "/tmp/pi/project",
-            "--no-color",
-        ])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("pi:pi-slash"))
-        .stdout(predicate::str::contains("Pi slash project"));
-}
-
-#[test]
-fn claude_dotted_project_filter_keeps_matching_session() {
-    let tmp = TempDir::new().expect("temp dir");
-    write_file(
-        &tmp.path()
-            .join(".claude/projects/-home-osso--claude-rules/claude-dotted.jsonl"),
-        r#"{"type":"user","sessionId":"claude-dotted","timestamp":"2026-06-07T10:00:00Z","cwd":"/home/osso/.claude/rules","message":{"content":"Claude dotted project"}}
-"#,
-    );
-
-    agent_history(tmp.path())
-        .args([
-            "search",
-            "Claude dotted project",
-            "--source",
-            "claude",
-            "--project",
-            ".claude/rules",
-            "--no-color",
-        ])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("claude:claude-dotted"))
-        .stdout(predicate::str::contains("Claude dotted project"));
-}
-
-#[test]
-fn claude_hyphen_project_filter_keeps_matching_session() {
-    let tmp = TempDir::new().expect("temp dir");
-    write_file(
-        &tmp.path()
-            .join(".claude/projects/-tmp-foo-bar/claude-hyphen.jsonl"),
-        r#"{"type":"user","sessionId":"claude-hyphen","timestamp":"2026-06-06T10:00:00Z","cwd":"/tmp/foo-bar","message":{"content":"Claude hyphen project"}}
-"#,
-    );
-
-    agent_history(tmp.path())
-        .args([
-            "search",
-            "Claude hyphen project",
-            "--source",
-            "claude",
-            "--project",
-            "/tmp/foo-bar",
-            "--no-color",
-        ])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("claude:claude-hyphen"))
-        .stdout(predicate::str::contains("Claude hyphen project"));
+    for option in removed_options {
+        let mut args = vec!["search", "query"];
+        args.extend(option);
+        agent_history(home.path(), &fake_bin, &argv_log, "")
+            .args(args)
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains("unexpected argument"));
+    }
 }

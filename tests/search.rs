@@ -226,3 +226,82 @@ fn pi_source_without_storage_returns_no_results_not_an_error() {
         .code(1)
         .stderr(predicate::str::is_empty());
 }
+
+#[test]
+fn claude_slash_project_filter_keeps_matching_session() {
+    let tmp = TempDir::new().expect("temp dir");
+    write_file(
+        &tmp.path()
+            .join(".claude/projects/-tmp-globalcomix-gc/claude-slash.jsonl"),
+        r#"{"type":"user","sessionId":"claude-slash","timestamp":"2026-06-04T10:00:00Z","cwd":"/tmp/globalcomix/gc","message":{"content":"Claude slash project"}}
+"#,
+    );
+
+    agent_history(tmp.path())
+        .args([
+            "search",
+            "Claude slash project",
+            "--source",
+            "claude",
+            "--project",
+            "globalcomix/gc",
+            "--no-color",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("claude:claude-slash"))
+        .stdout(predicate::str::contains("Claude slash project"));
+}
+
+#[test]
+fn pi_slash_project_filter_keeps_matching_session() {
+    let tmp = TempDir::new().expect("temp dir");
+    write_file(
+        &tmp.path()
+            .join(".config/pi/agent/sessions/demo-project/pi-slash.jsonl"),
+        r#"{"type":"session","version":3,"id":"pi-slash","timestamp":"2026-06-05T10:00:00Z","cwd":"/tmp/pi/project"}
+{"type":"message","id":"m1","timestamp":"2026-06-05T10:00:01Z","message":{"role":"user","content":[{"type":"text","text":"Pi slash project"}]}}
+"#,
+    );
+
+    agent_history(tmp.path())
+        .args([
+            "search",
+            "Pi slash project",
+            "--source",
+            "pi",
+            "--project",
+            "/tmp/pi/project",
+            "--no-color",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("pi:pi-slash"))
+        .stdout(predicate::str::contains("Pi slash project"));
+}
+
+#[test]
+fn claude_hyphen_project_filter_keeps_matching_session() {
+    let tmp = TempDir::new().expect("temp dir");
+    write_file(
+        &tmp.path()
+            .join(".claude/projects/-tmp-foo-bar/claude-hyphen.jsonl"),
+        r#"{"type":"user","sessionId":"claude-hyphen","timestamp":"2026-06-06T10:00:00Z","cwd":"/tmp/foo-bar","message":{"content":"Claude hyphen project"}}
+"#,
+    );
+
+    agent_history(tmp.path())
+        .args([
+            "search",
+            "Claude hyphen project",
+            "--source",
+            "claude",
+            "--project",
+            "/tmp/foo-bar",
+            "--no-color",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("claude:claude-hyphen"))
+        .stdout(predicate::str::contains("Claude hyphen project"));
+}

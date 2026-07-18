@@ -314,7 +314,7 @@ fn path_project_filter_can_prune(path: &str, filter: Option<&str>) -> bool {
         return false;
     };
 
-    !filter.contains('/') && !path.contains(filter)
+    !path.contains(filter)
 }
 
 fn path_contains_optional_filter(path: &str, filter: Option<&str>) -> bool {
@@ -659,4 +659,44 @@ fn json_string(value: &Value, key: &str) -> String {
         .and_then(|item| item.as_str())
         .unwrap_or("")
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn claude_project_filter_with_slashes_prunes_unrelated_encoded_paths_and_keeps_matches() {
+        let args = SearchArgs {
+            pattern: "needle".to_string(),
+            source: SourceFilter::Claude,
+            role: None,
+            project: Some("globalcomix/gc".to_string()),
+            session: None,
+            since: None,
+            until: None,
+            ignore_case: false,
+            max_count: None,
+            files_with_matches: false,
+            live_only: false,
+            archive_only: false,
+            all: false,
+            json: false,
+            no_color: true,
+        };
+
+        assert!(path_encoded_filters_match(
+            Source::Claude,
+            Path::new("/home/user/.claude/projects"),
+            Path::new("/home/user/.claude/projects/-tmp-globalcomix-gc/session.jsonl"),
+            &args,
+        ));
+        assert!(!path_encoded_filters_match(
+            Source::Claude,
+            Path::new("/home/user/.claude/projects"),
+            Path::new("/home/user/.claude/projects/-tmp-other/session.jsonl"),
+            &args,
+        ));
+    }
 }

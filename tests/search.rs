@@ -24,7 +24,7 @@ fn fake_claude_memory(root: &Path) -> (PathBuf, PathBuf) {
     fs::create_dir_all(&bin).expect("create fake backend directory");
     fs::write(
         &executable,
-        "#!/bin/sh\nprintf '%s\\n' '---' >> \"$FAKE_ARGV_LOG\"\nfor arg in \"$@\"; do printf '%s\\n' \"$arg\" >> \"$FAKE_ARGV_LOG\"; done\nprintf '%s' \"$FAKE_OUTPUT\"\nexit 0\n",
+        "#!/bin/sh\nprintf '%s\\n' '---' >> \"$FAKE_ARGV_LOG\"\nfor arg in \"$@\"; do printf '%s\\n' \"$arg\" >> \"$FAKE_ARGV_LOG\"; done\nprintf '%s' \"$FAKE_OUTPUT\"\nexit \"${FAKE_EXIT_CODE:-0}\"\n",
     )
     .expect("write fake backend");
 
@@ -61,27 +61,83 @@ fn assert_in_order(output: &str, values: &[&str]) {
 }
 
 #[test]
-fn plain_query_invokes_claude_memory_once_with_default_limit() {
+fn plain_query_uses_only_claude_memory_with_default_limit() {
     let home = TempDir::new().expect("temp home");
+    let local_session = home.path().join(".claude/projects/project/session.jsonl");
+    fs::create_dir_all(local_session.parent().expect("session parent"))
+        .expect("create local session directory");
+    fs::write(
+        local_session,
+        "{\"type\":\"user\",\"sessionId\":\"local-session\",\"timestamp\":\"2026-07-18T00:00:00Z\",\"cwd\":\"/tmp/project\",\"message\":{\"content\":\"local-only-marker\"}}\n",
+    )
+    .expect("write local transcript");
+
     let fake_root = TempDir::new().expect("fake backend root");
     let (fake_bin, argv_log) = fake_claude_memory(fake_root.path());
     let output = r#"{"type":"answer","text":"backend result","source":"session","path":"/history/one","session_id":"session-one","score":0.99}
 "#;
 
-    agent_history(home.path(), &fake_bin, &argv_log, output)
-        .args(["search", "literal .* [query]", "--no-color"])
+    let stdout = agent_history(home.path(), &fake_bin, &argv_log, output)
+        .args(["search", "local-only-marker", "--no-color"])
         .assert()
-        .success();
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(stdout).expect("UTF-8 stdout");
+    assert!(stdout.contains("backend result"));
+    assert!(!stdout.contains("local-session"));
+
+    let mut failed_backend = agent_history(home.path(), &fake_bin, &argv_log, "");
+    failed_backend.env("FAKE_EXIT_CODE", "23");
+    failed_backend
+        .args(["search", "local-only-marker", "--no-color"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "claude-memory exited with status 23",
+        ));
+
+    agent_history(home.path(), &fake_bin, &argv_log, "not JSON\n")
+        .args(["search", "local-only-marker", "--no-color"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "invalid claude-memory JSON record",
+        ));
+
+    agent_history(home.path(), &fake_bin, &argv_log, "")
+        .env("PATH", "/definitely/missing")
+        .args(["search", "local-only-marker", "--no-color"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("failed to spawn claude-memory"));
 
     assert_eq!(
         invocations(&argv_log),
-        vec![vec![
-            "search".to_owned(),
-            "--json".to_owned(),
-            "--limit".to_owned(),
-            "5".to_owned(),
-            "literal .* [query]".to_owned(),
-        ]]
+        vec![
+            vec![
+                "search".to_owned(),
+                "--json".to_owned(),
+                "--limit".to_owned(),
+                "5".to_owned(),
+                "local-only-marker".to_owned(),
+            ],
+            vec![
+                "search".to_owned(),
+                "--json".to_owned(),
+                "--limit".to_owned(),
+                "5".to_owned(),
+                "local-only-marker".to_owned(),
+            ],
+            vec![
+                "search".to_owned(),
+                "--json".to_owned(),
+                "--limit".to_owned(),
+                "5".to_owned(),
+                "local-only-marker".to_owned(),
+            ],
+        ]
     );
 }
 

@@ -21,8 +21,8 @@
 ### Removed surface and data scope
 
 - [x] Reject removed options: `--source`, `--role`, `--project`, `--session`, `--since`, `--until`, `-i`/`--ignore-case`, `-l`/`--files-with-matches`, `--live-only`, `--archive-only`, and `--all`.
-- [ ] Restrict searchable data to `claude-memory` results; do not scan local Claude, Codex, or Pi session files.
-- [ ] Provide no fallback retrieval path when `claude-memory` is unavailable, fails, or returns invalid data.
+- [x] Restrict searchable data to `claude-memory` results; do not scan local Claude, Codex, or Pi session files.
+- [x] Provide no fallback retrieval path when `claude-memory` is unavailable, fails, or returns invalid data.
 
 ## How it works
 
@@ -37,12 +37,11 @@
 
 ## Tests asserting this spec
 
-- `tests/search.rs` — asserts query forwarding, default and explicit limits, JSON passthrough, human field order, color behavior, and rejection of removed options.
+- `tests/search.rs` — asserts query forwarding, default and explicit limits, JSON passthrough, human field order, color behavior, rejection of removed options, ignored local transcripts, and explicit backend failure handling without fallback.
 
 ## Known gaps (current cycle)
 
-- [ ] Add a direct test proving local session files are ignored when they contain the query.
-- [ ] Add direct tests proving backend failures do not trigger an alternate retrieval path.
+- None.
 
 ## Out of scope
 
